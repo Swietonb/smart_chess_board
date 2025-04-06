@@ -46,4 +46,4 @@ SERVER_PORT = 5000
 BUFFER_SIZE = 4096
 
 # Konfiguracja Lichess API
-LICHESS_API_TOKEN = "lip_X87QKV2iLbWUdrMtI6qP"  # Wpisz swój token API
+LICHESS_API_TOKEN = "xxx"  # Wpisz swój token API

@@ -1,80 +1,46 @@
-# main.py
 from chess_server import ChessServer
 from lichess_client import LichessClient
-from config import LICHESS_API_TOKEN
+from chess_move_handler import ChessMoveHandler
+from config import LICHESS_API_TOKEN, COLOR_GREEN
 import threading
 import time
 
-# Flagi do koordynacji
+# Obiekty globalne
 lichess_client = None
-waiting_for_user_move = False
-user_move_thread = None
+chess_server = None
+move_handler = None
 
 
 def handle_opponent_move(move):
     """Funkcja wywoływana, gdy przeciwnik wykona ruch."""
-    # W przyszłości tu będzie kod do obsługi ruchu przeciwnika na szachownicy
+    global move_handler
     print(f"Przeciwnik wykonał ruch: {move}")
+
+    # Ustaw flagę, że teraz jest twoja tura
+    if move_handler:
+        move_handler.set_player_turn(True)
 
 
 def handle_my_turn():
     """Funkcja wywoływana, gdy jest Twoja kolej."""
-    global waiting_for_user_move, user_move_thread
+    global move_handler
+    print("\nTwój ruch! Podnieś figurę, którą chcesz ruszyć, i postaw ją na polu docelowym.")
 
-    # Jeśli już czekamy na ruch użytkownika, nie rób nic
-    if waiting_for_user_move:
-        return
-
-    # Rozpocznij nowy wątek do pobierania ruchu od użytkownika
-    waiting_for_user_move = True
-    user_move_thread = threading.Thread(target=get_and_make_move)
-    user_move_thread.daemon = True
-    user_move_thread.start()
+    # Ustaw flagę, że teraz jest twoja tura
+    if move_handler:
+        move_handler.set_player_turn(True)
 
 
-def get_and_make_move():
-    """Pobiera ruch od użytkownika i wykonuje go."""
-    global waiting_for_user_move, lichess_client
-
-    print("\nTwój ruch!")
-    while waiting_for_user_move:
-        user_move = get_user_move()
-
-        if user_move == 'resign':
-            lichess_client.resign_game()
-            waiting_for_user_move = False
-            break
-        elif user_move == 'draw':
-            lichess_client.offer_draw()
-            # Nie kończymy czekania, bo przeciwnik może odrzucić remis
-        else:
-            success = lichess_client.make_move(user_move)
-            if success:
-                waiting_for_user_move = False
-                break
-            # Jeśli ruch się nie powiódł, prosimy o podanie ruchu ponownie
-
-
-def get_user_move():
-    """Pobiera ruch od użytkownika w formacie UCI."""
-    while True:
-        user_move = input("Twój ruch (w formacie UCI, np. e2e4): ").strip().lower()
-
-        # Obsługa specjalnych komend
-        if user_move in ['resign', 'draw']:
-            return user_move
-
-        # Podstawowe sprawdzanie formatu UCI
-        if len(user_move) >= 4 and all(c in "abcdefgh12345678" for c in user_move[:4]):
-            return user_move
-
-        print("Niepoprawny format ruchu. Spróbuj ponownie.")
-        print("Możesz też napisać 'resign' aby poddać partię lub 'draw' aby zaproponować remis.")
+def handle_reed_changes(changes):
+    """Funkcja wywoływana, gdy zmienia się stan przełączników Reed."""
+    global move_handler
+    if move_handler:
+        move_handler.handle_reed_change(changes)
 
 
 def on_board_ready():
     """Funkcja wywoływana, gdy szachownica jest gotowa."""
-    global lichess_client
+    global lichess_client, chess_server, move_handler
 
     print("\n=== SZACHOWNICA GOTOWA ===")
     print("Wszystkie figury są ustawione w pozycji startowej.\n")
@@ -82,12 +48,18 @@ def on_board_ready():
     # Pobierz ID partii od użytkownika
     game_id = input("Podaj ID partii Lichess: ")
 
+    # Włącz tryb gry w serwerze szachownicy
+    chess_server.set_game_mode(True)
+
     # Inicjalizacja klienta Lichess
     lichess_client = LichessClient(
         api_token=LICHESS_API_TOKEN,
         on_opponent_move=handle_opponent_move,
         on_my_turn=handle_my_turn
     )
+
+    # Inicjalizacja obsługi ruchów
+    move_handler = ChessMoveHandler(chess_server, lichess_client)
 
     # Rozpoczęcie gry
     lichess_client.start_game(game_id)
@@ -97,8 +69,21 @@ def main():
     print("=== SERWER SZACHOWNICY ===")
 
     # Inicjalizacja i uruchomienie serwera
-    server = ChessServer(on_board_ready=on_board_ready)
-    server.start()
+    global chess_server
+    chess_server = ChessServer(
+        on_board_ready=on_board_ready,
+        on_reed_change=handle_reed_changes
+    )
+
+    # Dodaj referencje do mapowań
+    from config import MAPPING, LED_TO_CHESS, CHESS_TO_LED, BUFFER_SIZE
+    chess_server.MAPPING = MAPPING
+    chess_server.LED_TO_CHESS = LED_TO_CHESS
+    chess_server.CHESS_TO_LED = CHESS_TO_LED
+    chess_server.BUFFER_SIZE = BUFFER_SIZE
+
+    # Uruchom serwer
+    chess_server.start()
 
     print("Serwer uruchomiony. Aby zakończyć, naciśnij Ctrl+C")
 
@@ -109,12 +94,12 @@ def main():
     except KeyboardInterrupt:
         print("\nZatrzymywanie serwera...")
 
-        # Zatrzymaj klienta Lichess jeśli istnieje
-        global lichess_client
+        # Zatrzymaj komponenty
         if lichess_client:
             lichess_client.stop()
-
-        server.stop()
+        if move_handler:
+            move_handler.stop()
+        chess_server.stop()
 
 
 if __name__ == "__main__":
