@@ -22,9 +22,18 @@ class ChessMoveHandler:
         self.opponent_source_lifted = False
         self.opponent_timer = None  # Timer dla ruchu przeciwnika
 
+        # Nowe zmienne dla obsługi bić
+        self.capturing = False
+        self.capture_timer = None
+        self.capture_lifted = False
+        self.capture_target = None
+
     def set_player_turn(self, is_turn):
         """Ustawia, czy jest tura gracza."""
         self.is_player_turn = is_turn
+
+        # Aktualizuj stan w ChessServer
+        self.chess_server.is_player_turn = is_turn
 
     def handle_opponent_move(self, move):
         """Obsługuje ruch przeciwnika."""
@@ -51,6 +60,10 @@ class ChessMoveHandler:
 
         # Wyłącz tryb gracza
         self.is_player_turn = False
+
+        # Aktualizuj stan w ChessServer dla wyświetlacza ESP32
+        self.chess_server.opponent_move_pending = True
+        self.chess_server.is_player_turn = False
 
         print("\nWykonaj ruch przeciwnika na szachownicy:")
         print(f"1. Podnieś figurę z pola {source}")
@@ -86,7 +99,22 @@ class ChessMoveHandler:
 
     def _handle_figure_lifted(self, position):
         """Obsługuje podniesienie figury."""
-        # Jeśli już jest ruch w trakcie, ignoruj
+        # Jeśli trwa proces bicia i figura została podniesiona z pola docelowego (potencjalne bicie)
+        if self.move_in_progress and self.target_position and position == self.target_position:
+            print(f"Podniesiono figurę przeciwnika z pola {position} (bicie)")
+            self.capture_lifted = True
+            self.capture_target = position
+
+            # Anuluj istniejący timer bicia, jeśli istnieje
+            if self.capture_timer:
+                self.capture_timer.cancel()
+
+            # Uruchom timer dla podniesionej figury (1 sekunda)
+            self.capture_timer = threading.Timer(1.0, self._handle_capture_lifted_timeout)
+            self.capture_timer.start()
+            return
+
+        # Standardowa obsługa podniesienia figury gracza
         if self.move_in_progress and self.source_position:
             return
 
@@ -101,6 +129,7 @@ class ChessMoveHandler:
 
         # Zapal diodę na pozycji źródłowej (migająca zielona)
         self.chess_server.set_led(position, COLOR_GREEN, blink=True)
+        print(f"DEBUG: Ustawiono migającą zieloną diodę na polu {position}")
 
     def _handle_figure_placed(self, position):
         """Obsługuje postawienie figury."""
@@ -112,21 +141,55 @@ class ChessMoveHandler:
         if position == self.source_position:
             return
 
+        # Sprawdź, czy trwa proces bicia
+        if self.capture_lifted and position == self.capture_target:
+            print(f"Postawiono własną figurę na polu {position} (zakończenie bicia)")
+
+            # Anuluj istniejący timer bicia
+            if self.capture_timer:
+                self.capture_timer.cancel()
+
+            # Zapal diodę na pozycji docelowej (migająca zielona)
+            self.chess_server.set_led(position, COLOR_GREEN, blink=True)
+
+            # Uruchom timer na sekundę przed wykonaniem ruchu
+            if self.timer:
+                self.timer.cancel()
+
+            print(f"Potwierdzanie bicia z {self.source_position} na {position}. Czekaj 1 sekundę...")
+            self.timer = threading.Timer(1.0, self._execute_move, args=[self.source_position, position])
+            self.timer.start()
+            return
+
         print(f"Postawiono figurę na polu {position}")
 
-        # Pozycja docelowa
-        target_position = position
+        # Sprawdź, czy na polu docelowym jest już figura (potencjalne bicie)
+        target_state = self._get_reed_state(position)
+        if target_state == 1:
+            print(f"Wykryto figurę na polu docelowym {position} - rozpoczęcie sekwencji bicia")
+            self.capturing = True
+            self.target_position = position
 
+            # Zapal diodę na pozycji docelowej (migająca zielona)
+            self.chess_server.set_led(position, COLOR_GREEN, blink=True)
+            return
+
+        # Standardowa obsługa dla ruchu bez bicia
         # Zapal diodę na pozycji docelowej (migająca zielona)
-        self.chess_server.set_led(target_position, COLOR_GREEN, blink=True)
+        self.chess_server.set_led(position, COLOR_GREEN, blink=True)
 
         # Uruchom timer na sekundę przed wykonaniem ruchu
         if self.timer:
             self.timer.cancel()
 
-        print(f"Potwierdzanie ruchu z {self.source_position} na {target_position}. Czekaj 1 sekundę...")
-        self.timer = threading.Timer(1.0, self._execute_move, args=[self.source_position, target_position])
+        print(f"Potwierdzanie ruchu z {self.source_position} na {position}. Czekaj 1 sekundę...")
+        self.timer = threading.Timer(1.0, self._execute_move, args=[self.source_position, position])
         self.timer.start()
+
+    def _handle_capture_lifted_timeout(self):
+        """Obsługuje upłynięcie czasu po podniesieniu figury przeciwnika podczas bicia."""
+        print("Figura przeciwnika podniesiona wystarczająco długo - możesz postawić swoją figurę")
+        # Nie robimy nic specjalnego, po prostu informujemy użytkownika
 
     def _execute_move(self, source, target):
         """Wykonuje ruch po upływie czasu potwierdzenia."""
@@ -144,6 +207,10 @@ class ChessMoveHandler:
         # Zresetuj stan ruchu
         self.move_in_progress = False
         self.source_position = None
+        self.target_position = None
+        self.capturing = False
+        self.capture_lifted = False
+        self.capture_target = None
 
         # Wyłącz turę gracza po wykonaniu ruchu
         if success:
@@ -157,6 +224,8 @@ class ChessMoveHandler:
             self.timer.cancel()
         if self.opponent_timer:
             self.opponent_timer.cancel()
+        if self.capture_timer:
+            self.capture_timer.cancel()
 
     def _handle_opponent_move_reed_changes(self, changes):
         """Obsługuje zmiany przełączników Reed podczas wykonywania ruchu przeciwnika."""
@@ -199,9 +268,31 @@ class ChessMoveHandler:
         self.opponent_move_pending = False
         self.opponent_source_lifted = False
 
+        # Aktualizuj status w ChessServer
+        self.chess_server.opponent_move_pending = False
+
         # Wyczyść diody
         self.chess_server.clear_all_leds()
 
         # Przejdź do obsługi ruchu gracza
         self.is_player_turn = True
+        self.chess_server.is_player_turn = True
+
         print("\nTeraz Twój ruch!")
+
+    def _get_reed_state(self, position):
+        """Pobiera aktualny stan przełącznika Reed na danej pozycji."""
+        if hasattr(self.chess_server, 'previous_reed_data') and self.chess_server.previous_reed_data:
+            # Pobierz numer LED dla pozycji
+            if position in self.chess_server.CHESS_TO_LED:
+                led_num = self.chess_server.CHESS_TO_LED[position]
+                # Znajdź odpowiedni MCP, port i pin
+                for mcp_name, ports in self.chess_server.MAPPING.items():
+                    for port_name, pins in ports.items():
+                        for pin_name, pin_led in pins.items():
+                            if pin_led == led_num:
+                                # Pobierz stan przełącznika
+                                state = self.chess_server.previous_reed_data.get(mcp_name, {}).get(port_name, {}).get(
+                                    pin_name, 0)
+                                return state
+        return 0  # Domyślnie zakładamy brak figury
