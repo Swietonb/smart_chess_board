@@ -143,8 +143,13 @@ class ChessServer:
             self.board_ready = is_board_ready(reed_data)
 
             # Jeśli stan gotowości się zmienił, wywołaj callback
-            if self.board_ready and not was_ready and self.on_board_ready_callback:
-                self.on_board_ready_callback()
+            if self.board_ready and not was_ready:
+                # Wyczyść wszystkie standardowe diody
+                leds_with_colors = []
+
+                # Wywołaj callback jeśli istnieje
+                if self.on_board_ready_callback:
+                    self.on_board_ready_callback()
 
             # Odsyłamy informacje o LED do ESP32 wraz ze stanem reed switchy
             response = json.dumps({

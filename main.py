@@ -11,19 +11,29 @@ chess_server = None
 move_handler = None
 
 
+# main.py - zmodyfikuj
+
 def handle_opponent_move(move):
     """Funkcja wywoływana, gdy przeciwnik wykona ruch."""
     global move_handler
     print(f"Przeciwnik wykonał ruch: {move}")
 
-    # Ustaw flagę, że teraz jest twoja tura
+    # Przekaż ruch przeciwnika do obsługi przez ChessMoveHandler
     if move_handler:
-        move_handler.set_player_turn(True)
+        move_handler.handle_opponent_move(move)
+    else:
+        print("BŁĄD: move_handler nie jest zainicjalizowany!")
 
 
 def handle_my_turn():
     """Funkcja wywoływana, gdy jest Twoja kolej."""
     global move_handler
+
+    # Jeśli obsługujemy ruch przeciwnika, jeszcze nie ustawiajmy tury gracza
+    if move_handler and move_handler.opponent_move_pending:
+        print("DEBUG: Oczekiwanie na wykonanie ruchu przeciwnika na szachownicy...")
+        return
+
     print("\nTwój ruch! Podnieś figurę, którą chcesz ruszyć, i postaw ją na polu docelowym.")
 
     # Ustaw flagę, że teraz jest twoja tura
