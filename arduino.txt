@@ -1,0 +1,650 @@
+
+
+#include <Wire.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <Adafruit_MCP23X17.h>
+#include <Adafruit_NeoPixel.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <ArduinoJson.h>
+
+// Konfiguracja WiFi
+const char* ssid = "";       // Wprowadź nazwę swojej sieci WiFi
+const char* password = ""; // Wprowadź hasło do sieci WiFi
+const char* serverIP = "";   // Wprowadź IP komputera z serwerem Python
+const int serverPort = 5000;              // Port serwera Python
+
+// Parametry wyświetlacza OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// Inicjalizacja wyświetlacza OLED
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Inicjalizacja MCP23017
+Adafruit_MCP23X17 mcp1; // Adres 0x20
+Adafruit_MCP23X17 mcp2; // Adres 0x21
+Adafruit_MCP23X17 mcp3; // Adres 0x22
+Adafruit_MCP23X17 mcp4; // Adres 0x24
+
+// Inicjalizacja paska LED
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(120, 4, NEO_GRB + NEO_KHZ800);
+
+// Zmienne globalne
+WiFiClient client;
+String gameStatus = "Ustaw figury w pozycji startowej";
+bool blinkState = false;
+unsigned long lastBlinkTime = 0;
+const int blinkInterval = 500;
+bool isConnected = false;
+
+// Przechowywanie poprzedniego stanu Reed do wykrywania zmian
+DynamicJsonDocument prevReedState(2048);
+bool firstRead = true;
+
+// Kolory LED
+uint32_t COLOR_RED = strip.Color(51, 0, 0);
+uint32_t COLOR_GREEN = strip.Color(0, 51, 0);
+uint32_t COLOR_YELLOW = strip.Color(51, 51, 0);
+uint32_t COLOR_ORANGE = strip.Color(51, 33, 0);
+uint32_t COLOR_OFF = strip.Color(0, 0, 0);
+
+// Struktura przechowująca dane LED
+struct LED {
+  bool state;       // Czy włączony
+  bool blink;       // Czy miga
+  uint32_t color;   // Kolor
+};
+
+// Stan wszystkich LED
+LED ledStates[120];
+
+// Inicjalizacja MCP
+void initMCP(Adafruit_MCP23X17 &mcp) {
+  for (uint8_t i = 0; i < 16; i++) {
+    mcp.pinMode(i, INPUT_PULLUP);
+  }
+}
+
+// Połączenie z WiFi
+void connectToWiFi() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Laczenie z WiFi...");
+  display.display();
+  
+  WiFi.setSleep(false);
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    attempts++;
+    display.print(".");
+    display.display();
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("WiFi polaczono!");
+    display.println(WiFi.localIP().toString());
+    display.display();
+  } else {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Blad polaczenia WiFi!");
+    display.display();
+  }
+}
+
+// Sprawdzanie i odnawianie połączenia WiFi
+void checkWiFiConnection() {
+  static unsigned long lastReconnectAttempt = 0;
+  unsigned long currentMillis = millis();
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    if (currentMillis - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = currentMillis;
+      Serial.println("Utracono połączenie WiFi, ponowne łączenie...");
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+    }
+  }
+}
+
+// Odczyt stanu przełączników Reed
+DynamicJsonDocument readReedSwitches() {
+  DynamicJsonDocument doc(2048);
+  
+  // Struktury dla MCP1
+  JsonObject mcp1_obj = doc["MCP1"].to<JsonObject>();
+  JsonObject mcp1_PA = mcp1_obj["PA"].to<JsonObject>();
+  JsonObject mcp1_PB = mcp1_obj["PB"].to<JsonObject>();
+  
+  // Struktury dla MCP2
+  JsonObject mcp2_obj = doc["MCP2"].to<JsonObject>();
+  JsonObject mcp2_PA = mcp2_obj["PA"].to<JsonObject>();
+  JsonObject mcp2_PB = mcp2_obj["PB"].to<JsonObject>();
+  
+  // Struktury dla MCP3
+  JsonObject mcp3_obj = doc["MCP3"].to<JsonObject>();
+  JsonObject mcp3_PA = mcp3_obj["PA"].to<JsonObject>();
+  JsonObject mcp3_PB = mcp3_obj["PB"].to<JsonObject>();
+  
+  // Struktury dla MCP4
+  JsonObject mcp4_obj = doc["MCP4"].to<JsonObject>();
+  JsonObject mcp4_PA = mcp4_obj["PA"].to<JsonObject>();
+  JsonObject mcp4_PB = mcp4_obj["PB"].to<JsonObject>();
+  
+  // Odczyt MCP1
+  for (int i = 0; i < 8; i++) {
+    mcp1_PA["PA" + String(7-i)] = !mcp1.digitalRead(7-i);
+    mcp1_PB["PB" + String(7-i)] = !mcp1.digitalRead(15-i);
+  }
+  
+  // Odczyt MCP2
+  for (int i = 0; i < 8; i++) {
+    mcp2_PA["PA" + String(7-i)] = !mcp2.digitalRead(7-i);
+    mcp2_PB["PB" + String(7-i)] = !mcp2.digitalRead(15-i);
+  }
+  
+  // Odczyt MCP3
+  for (int i = 0; i < 8; i++) {
+    mcp3_PA["PA" + String(7-i)] = !mcp3.digitalRead(7-i);
+    mcp3_PB["PB" + String(7-i)] = !mcp3.digitalRead(15-i);
+  }
+  
+  // Odczyt MCP4
+  for (int i = 0; i < 8; i++) {
+    mcp4_PA["PA" + String(7-i)] = !mcp4.digitalRead(7-i);
+    mcp4_PB["PB" + String(7-i)] = !mcp4.digitalRead(15-i);
+  }
+  
+  return doc;
+}
+
+// Sprawdź czy stan Reed się zmienił
+bool hasReedStateChanged(DynamicJsonDocument &currentState) {
+  if (firstRead) {
+    firstRead = false;
+    prevReedState = currentState;
+    return true;
+  }
+  
+  bool changed = false;
+  
+  // Porównaj MCP1
+  for (int i = 0; i < 8; i++) {
+    String pin = "PA" + String(7-i);
+    if (currentState["MCP1"]["PA"][pin] != prevReedState["MCP1"]["PA"][pin]) {
+      changed = true;
+    }
+    
+    pin = "PB" + String(7-i);
+    if (currentState["MCP1"]["PB"][pin] != prevReedState["MCP1"]["PB"][pin]) {
+      changed = true;
+    }
+  }
+  
+  // Porównaj MCP2
+  for (int i = 0; i < 8; i++) {
+    String pin = "PA" + String(7-i);
+    if (currentState["MCP2"]["PA"][pin] != prevReedState["MCP2"]["PA"][pin]) {
+      changed = true;
+    }
+    
+    pin = "PB" + String(7-i);
+    if (currentState["MCP2"]["PB"][pin] != prevReedState["MCP2"]["PB"][pin]) {
+      changed = true;
+    }
+  }
+  
+  // Porównaj MCP3
+  for (int i = 0; i < 8; i++) {
+    String pin = "PA" + String(7-i);
+    if (currentState["MCP3"]["PA"][pin] != prevReedState["MCP3"]["PA"][pin]) {
+      changed = true;
+    }
+    
+    pin = "PB" + String(7-i);
+    if (currentState["MCP3"]["PB"][pin] != prevReedState["MCP3"]["PB"][pin]) {
+      changed = true;
+    }
+  }
+  
+  // Porównaj MCP4
+  for (int i = 0; i < 8; i++) {
+    String pin = "PA" + String(7-i);
+    if (currentState["MCP4"]["PA"][pin] != prevReedState["MCP4"]["PA"][pin]) {
+      changed = true;
+    }
+    
+    pin = "PB" + String(7-i);
+    if (currentState["MCP4"]["PB"][pin] != prevReedState["MCP4"]["PB"][pin]) {
+      changed = true;
+    }
+  }
+  
+  if (changed) {
+    prevReedState = currentState;
+  }
+  
+  return changed;
+}
+
+// Aktualizacja lokalnych diod LED
+void updateLocalLEDs() {
+  for (int i = 0; i < 120; i++) {
+    if (ledStates[i].state) {
+      if (ledStates[i].blink) {
+        if (blinkState) {
+          strip.setPixelColor(i, ledStates[i].color);
+        } else {
+          strip.setPixelColor(i, COLOR_OFF);
+        }
+      } else {
+        strip.setPixelColor(i, ledStates[i].color);
+      }
+    } else {
+      strip.setPixelColor(i, COLOR_OFF);
+    }
+  }
+  strip.show();
+}
+
+// Aktualizacja diod LED z serwera
+void updateLEDs(JsonArray leds) {
+  // Wyzeruj wszystkie flagi diod (zostaną ustawione tylko te, które przychodzą z serwera)
+  for (int i = 0; i < 120; i++) {
+    ledStates[i].state = false;
+  }
+  
+  // Ustaw nowy stan LED na podstawie danych z serwera
+  for (JsonVariant led : leds) {
+    int ledNum = led["led"].as<int>();
+    String color = led["color"].as<String>();
+    bool blink = led.containsKey("blink") ? led["blink"].as<bool>() : false;
+    
+    // Indeks diody (od 0)
+    int ledIndex = ledNum - 1;
+    if (ledIndex < 0 || ledIndex >= 120) continue;
+    
+    // Ustaw kolor diody
+    uint32_t ledColor = COLOR_OFF;
+    if (color == "red") ledColor = COLOR_RED;
+    else if (color == "green") ledColor = COLOR_GREEN;
+    else if (color == "yellow") ledColor = COLOR_YELLOW;
+    else if (color == "orange") ledColor = COLOR_ORANGE;
+    
+    // Zapisz stan diody
+    ledStates[ledIndex].state = true;
+    ledStates[ledIndex].blink = blink;
+    ledStates[ledIndex].color = ledColor;
+  }
+  
+  // Aktualizuj diody
+  updateLocalLEDs();
+}
+
+// Aktualizacja wyświetlacza
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Szachownica Online");
+  display.println("-------------------");
+  
+  // Wyświetl status połączenia
+  if (WiFi.status() == WL_CONNECTED) {
+    display.print("WiFi: ");
+    display.println(WiFi.SSID());
+  } else {
+    display.println("WiFi: Brak polaczenia");
+  }
+  
+  if (isConnected) {
+    display.println("Serwer: Polaczony");
+  } else {
+    display.println("Serwer: Brak polaczenia");
+  }
+  
+  display.println("-------------------");
+  
+  // Podziel status na linie (max 21 znaków na linię)
+  int y = 40;
+  int pos = 0;
+  while (pos < gameStatus.length()) {
+    int endPos = pos + 21;
+    if (endPos >= gameStatus.length()) {
+      endPos = gameStatus.length();
+    } else {
+      int lastSpace = gameStatus.substring(pos, endPos).lastIndexOf(' ');
+      if (lastSpace > 0) {
+        endPos = pos + lastSpace + 1;
+      }
+    }
+    
+    display.setCursor(0, y);
+    display.println(gameStatus.substring(pos, endPos));
+    pos = endPos;
+    y += 8;
+  }
+  
+  display.display();
+}
+
+// Połączenie z serwerem
+bool connectToServer() {
+  Serial.print("Łączenie z serwerem...");
+  if (client.connect(serverIP, serverPort)) {
+    Serial.println("Połączono!");
+    isConnected = true;
+    
+    // Wyślij pełny stan po połączeniu
+    DynamicJsonDocument currentState = readReedSwitches();
+    String jsonData;
+    serializeJson(currentState, jsonData);
+    
+    client.print(jsonData);
+    client.print("\n");
+    
+    return true;
+  } else {
+    Serial.println("Nie udało się połączyć");
+    isConnected = false;
+    return false;
+  }
+}
+
+// Odbierz odpowiedź od serwera
+String receiveServerResponse() {
+  String response = "";
+  bool responseComplete = false;
+  unsigned long startTime = millis();
+  
+  while (!responseComplete && millis() - startTime < 1000) {
+    while (client.available()) {
+      char c = client.read();
+      response += c;
+      
+      // Sprawdź, czy mamy kompletny JSON
+      if (c == '}' && response.indexOf('{') != -1) {
+        int openBraces = 0;
+        int closeBraces = 0;
+        
+        for (int i = 0; i < response.length(); i++) {
+          if (response.charAt(i) == '{') openBraces++;
+          if (response.charAt(i) == '}') closeBraces++;
+        }
+        
+        if (openBraces > 0 && openBraces == closeBraces) {
+          responseComplete = true;
+          break;
+        }
+      }
+    }
+    delay(5);
+  }
+  
+  if (responseComplete) {
+    int jsonStart = response.indexOf('{');
+    int jsonEnd = response.lastIndexOf('}') + 1;
+    
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      return response.substring(jsonStart, jsonEnd);
+    }
+  }
+  
+  return "";
+}
+
+// Komunikacja z serwerem - wysyłanie tylko po zmianie stanu
+void communicateWithServer() {
+  // Sprawdź połączenie
+  if (!client.connected()) {
+    static unsigned long lastConnectionAttempt = 0;
+    unsigned long currentTime = millis();
+    
+    if (currentTime - lastConnectionAttempt > 5000) {
+      lastConnectionAttempt = currentTime;
+      isConnected = false;
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        connectToServer();
+      }
+    }
+    return;
+  }
+  
+  // Odczytaj bieżący stan przełączników Reed
+  DynamicJsonDocument currentState = readReedSwitches();
+  
+  // Wykryj ważne zdarzenia związane z grą
+  static String previousGameStatus = "";
+  bool gameStatusChanged = (gameStatus != previousGameStatus);
+  bool reedStateChanged = hasReedStateChanged(currentState);
+  
+  // Sprawdź czy wystąpiło zdarzenie wymagające natychmiastowej komunikacji
+  bool importantEvent = false;
+  
+  // 1. Wykryj zmianę tury (pojawienie się "Twoj ruch" lub "Wykonaj ruch przeciwnika")
+  if (gameStatusChanged) {
+    if (gameStatus.indexOf("Twoj ruch!") >= 0 || 
+        gameStatus.indexOf("Wykonaj ruch przeciwnika") >= 0 ||
+        gameStatus.indexOf("Oczekiwanie na ruch przeciwnika") >= 0) {
+      importantEvent = true;
+      Serial.println("Wykryto zmianę tury! Natychmiastowa aktualizacja.");
+    }
+  }
+  
+  // 2. Wykryj podniesienie/postawienie figury w ważnych momentach gry
+  if (reedStateChanged) {
+    if (gameStatus.indexOf("Twoj ruch!") >= 0 || 
+        gameStatus.indexOf("Wykonaj ruch przeciwnika") >= 0) {
+      importantEvent = true;
+      Serial.println("Wykryto ruch figury! Natychmiastowa aktualizacja.");
+    }
+  }
+  
+  // Heartbeat - RZADZIEJ, co 30 sekund zamiast 10
+  static unsigned long lastHeartbeat = 0;
+  bool isHeartbeatTime = (millis() - lastHeartbeat > 500);
+  
+  // Wyślij aktualizację jeśli:
+  // 1. Wystąpiło ważne zdarzenie
+  // 2. Zmienił się status gry
+  // 3. Zmienił się stan Reed
+  // 4. Minęło 30 sekund od ostatniego powiadomienia (rzadszy heartbeat)
+  if (importantEvent || gameStatusChanged || reedStateChanged || isHeartbeatTime) {
+    if (isHeartbeatTime) {
+      lastHeartbeat = millis();
+    }
+    
+    if (gameStatusChanged) {
+      previousGameStatus = gameStatus;
+      Serial.println("Zmiana statusu gry: " + gameStatus);
+    }
+    
+    // Wyślij dane do serwera
+    String jsonData;
+    serializeJson(currentState, jsonData);
+    
+    // Dodaj metadane (w tym flagę ważnego zdarzenia)
+    DynamicJsonDocument msgDoc(4096);
+    msgDoc["type"] = "reed_state";
+    msgDoc["data"] = currentState;
+    
+    // Rodzaj zdarzenia - priorytetyzuj ważne zdarzenia
+    if (importantEvent) {
+      msgDoc["event"] = "important_event";
+    } else if (reedStateChanged) {
+      msgDoc["event"] = "state_change";
+    } else if (gameStatusChanged) {
+      msgDoc["event"] = "status_change";
+    } else {
+      msgDoc["event"] = "heartbeat";
+    }
+    
+    String fullMsg;
+    serializeJson(msgDoc, fullMsg);
+    
+    client.print(fullMsg);
+    client.print("\n");
+    
+    // Odbierz odpowiedź od serwera
+    String response = receiveServerResponse();
+    
+    if (response.length() > 0) {
+      // Parsuj JSON
+      DynamicJsonDocument doc(4096);
+      DeserializationError error = deserializeJson(doc, response);
+      
+      if (!error) {
+        // Aktualizuj diody LED
+        if (doc.containsKey("leds")) {
+          JsonArray leds = doc["leds"].as<JsonArray>();
+          updateLEDs(leds);
+        }
+        
+        // Aktualizuj status gry
+        if (doc.containsKey("status")) {
+          gameStatus = doc["status"].as<String>();
+        }
+      }
+    }
+  }
+  
+  // Aktywnie sprawdzaj, czy serwer ma coś do wysłania - 
+  // szczególnie ważne w trakcie tury przeciwnika
+  if (client.available() || gameStatus.indexOf("Oczekiwanie na ruch przeciwnika") >= 0) {
+    String response = receiveServerResponse();
+    
+    if (response.length() > 0) {
+      DynamicJsonDocument doc(4096);
+      DeserializationError error = deserializeJson(doc, response);
+      
+      if (!error) {
+        if (doc.containsKey("leds")) {
+          JsonArray leds = doc["leds"].as<JsonArray>();
+          updateLEDs(leds);
+        }
+        
+        if (doc.containsKey("status")) {
+          gameStatus = doc["status"].as<String>();
+        }
+      }
+    }
+  }
+}
+  
+void setup() {
+  Serial.begin(115200);
+  
+  // Inicjalizacja I2C
+  Wire.begin(21, 22);  // SDA = GPIO21, SCL = GPIO22
+  
+  // Inicjalizacja wyświetlacza OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Błąd inicjalizacji wyświetlacza OLED");
+    while (1);
+  }
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
+  
+  // Inicjalizacja układów MCP23017
+  bool mcpInitSuccess = true;
+  
+  if (!mcp1.begin_I2C(0x20)) {
+    Serial.println("Błąd inicjalizacji MCP1 (0x20)");
+    mcpInitSuccess = false;
+  } else {
+    initMCP(mcp1);
+  }
+  
+  if (!mcp2.begin_I2C(0x21)) {
+    Serial.println("Błąd inicjalizacji MCP2 (0x21)");
+    mcpInitSuccess = false;
+  } else {
+    initMCP(mcp2);
+  }
+  
+  if (!mcp3.begin_I2C(0x22)) {
+    Serial.println("Błąd inicjalizacji MCP3 (0x22)");
+    mcpInitSuccess = false;
+  } else {
+    initMCP(mcp3);
+  }
+  
+  if (!mcp4.begin_I2C(0x24)) {
+    Serial.println("Błąd inicjalizacji MCP4 (0x24)");
+    mcpInitSuccess = false;
+  } else {
+    initMCP(mcp4);
+  }
+  
+  if (!mcpInitSuccess) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Blad inicjalizacji MCP!");
+    display.display();
+    while (1);
+  }
+  
+  // Inicjalizacja paska LED
+  strip.begin();
+  strip.setBrightness(51);  // 20% jasności
+  strip.clear();
+  strip.show();
+  
+  // Inicjalizacja stanu LED
+  for (int i = 0; i < 120; i++) {
+    ledStates[i].state = false;
+    ledStates[i].blink = false;
+    ledStates[i].color = COLOR_OFF;
+  }
+  
+  // Połącz z WiFi
+  connectToWiFi();
+  
+  // Połącz z serwerem
+  connectToServer();
+}
+
+void loop() {
+  // Sprawdź i odnów połączenie WiFi
+  checkWiFiConnection();
+  
+  // Obsługa migania - aktualizowana lokalnie
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastBlinkTime > blinkInterval) {
+    lastBlinkTime = currentMillis;
+    blinkState = !blinkState;
+    
+    // Aktualizacja migających diod
+    updateLocalLEDs();
+  }
+  
+  // Komunikacja z serwerem - tylko gdy zmieni się stan
+  communicateWithServer();
+  
+  // Aktualizacja wyświetlacza
+  static unsigned long lastDisplayUpdate = 0;
+  if (currentMillis - lastDisplayUpdate > 500) {
+    lastDisplayUpdate = currentMillis;
+    updateDisplay();
+  }
+  
+  // Krótkie opóźnienie dla stabilności
+  delay(10);
+}
+

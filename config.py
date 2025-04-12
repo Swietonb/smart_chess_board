@@ -19,7 +19,6 @@ MAPPING = {
     }
 }
 # Mapowanie numerów LED na pola szachownicy
-# Mapowanie numerów LED na pola szachownicy
 LED_TO_CHESS = {
     1: "a1", 3: "b1", 5: "c1", 7: "d1", 9: "e1", 11: "f1", 13: "g1", 15: "h1",
     16: "h2", 18: "g2", 20: "f2", 22: "e2", 24: "d2", 26: "c2", 28: "b2", 30: "a2",
@@ -54,4 +53,4 @@ SERVER_PORT = 5000
 BUFFER_SIZE = 4096
 
 # Konfiguracja Lichess API
-LICHESS_API_TOKEN = "lip_tzSCoXqDGuuLpO4NvE2b"  # Wpisz swój token API
+LICHESS_API_TOKEN = ""

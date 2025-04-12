@@ -20,12 +20,15 @@ class ChessServer:
         self.custom_leds = []
         self.previous_reed_data = None
 
-        # Dodaj flagę trybu gry - na początku jest False (tryb ustawiania figur)
         self.game_mode = False
 
         # Stan pulsacji dla migających diod
         self.pulse_state = False
         self.last_pulse_change = time.time()
+
+        # Dodane pola do wyświetlania statusu
+        self.is_player_turn = False
+        self.opponent_move_pending = False
 
     def start(self):
         """Uruchamia serwer w osobnym wątku."""
@@ -56,25 +59,18 @@ class ChessServer:
 
         try:
             self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(5)
-
+            self.server_socket.listen(1)  # Przyjmuj tylko jedno połączenie na raz
             print(f"Serwer uruchomiony na {self.host}:{self.port}")
 
             while self.running:
-                try:
-                    # Timeout aby móc bezpieczniej zakończyć serwer
-                    self.server_socket.settimeout(1.0)
-                    client_socket, client_address = self.server_socket.accept()
+                print("Oczekiwanie na połączenie ESP32...")
+                # Akceptuj połączenie bez timeout
+                self.server_socket.settimeout(None)
+                client_socket, client_address = self.server_socket.accept()
+                print(f"Połączono z ESP32: {client_address}")
 
-                    # Obsługa klienta w osobnym wątku
-                    client_thread = threading.Thread(target=self._handle_client, args=(client_socket,))
-                    client_thread.daemon = True
-                    client_thread.start()
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if self.running:  # Ignoruj błędy podczas zamykania
-                        print(f"Błąd serwera: {e}")
+                # Obsługa klienta w tej samej pętli
+                self._handle_client(client_socket)
 
         except KeyboardInterrupt:
             print("\nWyłączanie serwera...")
@@ -85,83 +81,208 @@ class ChessServer:
                 self.server_socket.close()
 
     def _handle_client(self, client_socket):
-        """Obsługuje połączenie od klienta (ESP32)."""
+        """Obsługuje połączenie od klienta (ESP32) - model zdarzeniowy."""
         try:
-            # Odbieramy dane z ESP32
-            data = client_socket.recv(self.BUFFER_SIZE).decode('utf-8')
-            if not data:
-                return
+            client_socket.settimeout(5.0)
+            buffer = b""
 
-            # Parsujemy dane JSON
-            reed_data = json.loads(data)
+            # Stan LED dla porównywania zmian
+            previous_led_states = {}
 
-            # Zachowaj kopię reed_data do zwrócenia
-            original_reed_data = reed_data.copy()
+            print(f"Połączono z ESP32: {client_socket.getpeername()}")
 
-            # Wykryj zmiany w stanach przełączników Reed
-            if self.previous_reed_data:
-                self._detect_reed_changes(self.previous_reed_data, reed_data)
+            while self.running:
+                try:
+                    # Odbierz dane od ESP32
+                    data = client_socket.recv(self.BUFFER_SIZE)
+                    if not data:
+                        print("Klient rozłączony")
+                        break
 
-            # Zapamiętaj obecny stan Reed
-            self.previous_reed_data = reed_data.copy()
+                    buffer += data
 
-            # Aktualizacja stanu pulsacji co 0.5 sekundy
-            current_time = time.time()
-            if current_time - self.last_pulse_change > 0.5:
-                self.pulse_state = not self.pulse_state
-                self.last_pulse_change = current_time
+                    # Przetwarzaj tylko kompletne dane JSON
+                    json_start = buffer.find(b'{')
+                    if json_start >= 0:
+                        # Zliczanie nawiasów do znalezienia końca JSON
+                        open_braces = 0
+                        json_end = -1
 
-            # Przygotuj listę LED z informacją o kolorze
-            leds_with_colors = []
+                        for i in range(json_start, len(buffer)):
+                            if buffer[i] == ord('{'):
+                                open_braces += 1
+                            elif buffer[i] == ord('}'):
+                                open_braces -= 1
 
-            # PRIORYTET 1: Najpierw dodaj niestandardowe diody (własne podświetlenia pól)
-            custom_leds_positions = set()
-            if self.custom_leds:
-                for custom_led in self.custom_leds.copy():  # Używamy kopii, aby bezpiecznie modyfikować
-                    led_num = custom_led["led"]
-                    color = custom_led["color"]
-                    blink = custom_led.get("blink", False)
+                            if open_braces == 0:
+                                json_end = i + 1
+                                break
 
-                    # Jeśli dioda ma migać, obsłuż to
-                    if blink:
-                        if self.pulse_state:
-                            leds_with_colors.append({"led": led_num, "color": color})
-                    else:
-                        leds_with_colors.append({"led": led_num, "color": color})
+                        # Jeśli znaleziono kompletny JSON
+                        if json_end > 0:
+                            json_data = buffer[json_start:json_end]
+                            buffer = buffer[json_end:]  # Zachowaj resztę danych
 
-                    custom_leds_positions.add(led_num)
+                            # Przetwarzanie kompletnego JSON
+                            try:
+                                data_str = json_data.decode('utf-8').strip()
 
-            # PRIORYTET 2: Dodaj standardowe podświetlenia tylko w trybie ustawiania figur
-            if not self.game_mode:
-                standard_leds = process_data(reed_data)
-                for led_info in standard_leds:
-                    if led_info["led"] not in custom_leds_positions:
-                        leds_with_colors.append(led_info)
+                                message = json.loads(data_str)
 
-            # Sprawdź czy szachownica jest gotowa NA PODSTAWIE STANU REED
-            was_ready = self.board_ready
-            self.board_ready = is_board_ready(reed_data)
+                                # Sprawdź typ wiadomości i zdarzenie
+                                event_type = "unknown"
+                                if isinstance(message, dict):
+                                    if message.get("type") == "reed_state":
+                                        reed_data = message.get("data", {})
+                                        event_type = message.get("event", "unknown")
+                                    else:
+                                        reed_data = message
+                                else:
+                                    reed_data = message
 
-            # Jeśli stan gotowości się zmienił, wywołaj callback
-            if self.board_ready and not was_ready:
-                # Wyczyść wszystkie standardowe diody
-                leds_with_colors = []
+                                #print(f"Odebrano dane od ESP32 - zdarzenie: {event_type}")
 
-                # Wywołaj callback jeśli istnieje
-                if self.on_board_ready_callback:
-                    self.on_board_ready_callback()
+                                # Zachowaj kopię danych
+                                original_reed_data = reed_data.copy()
 
-            # Odsyłamy informacje o LED do ESP32 wraz ze stanem reed switchy
-            response = json.dumps({
-                "leds": leds_with_colors,
-                "reed_state": original_reed_data
-            })
-            client_socket.sendall(response.encode('utf-8'))
+                                # Wykryj zmiany w przełącznikach Reed
+                                reed_changes = None
+                                if self.previous_reed_data:
+                                    reed_changes = self._detect_reed_changes(self.previous_reed_data, reed_data)
+
+                                # Aktualizuj poprzedni stan
+                                self.previous_reed_data = reed_data.copy()
+
+                                # Przygotuj listę LED do zapalenia
+                                leds_with_colors = []
+
+                                # Dodaj niestandardowe diody
+                                custom_leds_positions = set()
+                                if hasattr(self, 'custom_leds') and self.custom_leds:
+                                    for custom_led in self.custom_leds.copy():
+                                        led_num = custom_led["led"]
+                                        color = custom_led["color"]
+                                        blink = custom_led.get("blink", False)
+
+                                        leds_with_colors.append({
+                                            "led": led_num,
+                                            "color": color,
+                                            "blink": blink
+                                        })
+                                        custom_leds_positions.add(led_num)
+
+                                # Dodaj standardowe podświetlenia w trybie ustawiania
+                                if not hasattr(self, 'game_mode') or not self.game_mode:
+                                    standard_leds = process_data(reed_data)
+                                    for led_info in standard_leds:
+                                        if led_info["led"] not in custom_leds_positions:
+                                            leds_with_colors.append(led_info)
+
+                                # Sprawdź czy szachownica jest gotowa
+                                was_ready = self.board_ready
+                                self.board_ready = is_board_ready(reed_data)
+
+                                # Jeśli stan gotowości się zmienił, wywołaj callback
+                                if self.board_ready and not was_ready and self.on_board_ready_callback:
+                                    self.custom_leds = []  # Wyczyść niestandardowe diody
+
+                                    # Wyślij natychmiastową aktualizację do ESP32
+                                    response = json.dumps({
+                                        "leds": [],
+                                        "status": "Szachownica gotowa. Podaj ID partii."
+                                    })
+                                    client_socket.sendall(response.encode() + b'\n')
+                                    self.on_board_ready_callback()
+
+                                # Przygotuj status gry
+                                game_status = "Ustaw figury w pozycji startowej"
+                                if self.board_ready:
+                                    if hasattr(self, 'game_mode') and self.game_mode:
+                                        if hasattr(self, 'is_player_turn') and self.is_player_turn:
+                                            game_status = "Twoj ruch! Podnieś figurę, którą chcesz ruszyć."
+                                        else:
+                                            if hasattr(self, 'opponent_move_pending') and self.opponent_move_pending:
+                                                game_status = "Wykonaj ruch przeciwnika na szachownicy."
+                                            else:
+                                                game_status = "Oczekiwanie na ruch przeciwnika..."
+                                    else:
+                                        game_status = "Szachownica gotowa. Podaj ID partii."
+
+                                # Określ, czy trzeba wysłać odpowiedź na podstawie zdarzenia
+                                send_response = False
+
+                                if event_type == "unknown":
+                                    send_response = True
+
+                                # 1. Heartbeat - zawsze odpowiadaj aby potwierdzić połączenie
+                                if event_type == "heartbeat":
+                                    send_response = True
+
+                                # 2. Zmiana fazy gry - zawsze odpowiadaj
+                                elif event_type == "phase_change":
+                                    send_response = True
+
+                                # 3. Zmiana stanu Reed - odpowiadaj w zależności od fazy gry
+                                elif event_type == "reed_change":
+                                    # W trybie gry
+                                    if hasattr(self, 'game_mode') and self.game_mode:
+                                        # Jeśli jest tura gracza - zawsze odpowiadaj na zmiany Reed
+                                        if hasattr(self, 'is_player_turn') and self.is_player_turn:
+                                            send_response = True
+                                            print("Wykryto ruch gracza w jego turze - wysyłam odpowiedź")
+                                        # Jeśli wykonujemy ruch przeciwnika - też odpowiadaj
+                                        elif hasattr(self, 'opponent_move_pending') and self.opponent_move_pending:
+                                            send_response = True
+                                            print(
+                                                "Wykryto zmianę podczas wykonywania ruchu przeciwnika - wysyłam odpowiedź")
+                                    else:
+                                        # W trybie ustawiania - odpowiadaj na zmiany Reed
+                                        send_response = True
+
+                                # Sprawdź, czy stan LED się zmienił
+                                current_led_states = {}
+                                for led_info in leds_with_colors:
+                                    led_num = led_info["led"]
+                                    led_key = f"{led_num}:{led_info['color']}:{led_info.get('blink', False)}"
+                                    current_led_states[led_num] = led_key
+
+                                led_state_changed = (previous_led_states != current_led_states)
+
+                                # Wyślij odpowiedź jeśli:
+                                # - Zdarzenie wymaga odpowiedzi
+                                # - Stan LED się zmienił
+                                # - To pierwsza odpowiedź
+                                if send_response or led_state_changed or not previous_led_states:
+                                    previous_led_states = current_led_states.copy()
+
+                                    response = json.dumps({
+                                        "leds": leds_with_colors,
+                                        "status": game_status
+                                    })
+                                    client_socket.sendall(response.encode() + b'\n')
+
+                                    #print(f"Wysłano odpowiedź na zdarzenie: {event_type}")
+
+                            except json.JSONDecodeError as e:
+                                print(f"Błąd parsowania JSON: {e}")
+                                print(f"Dane: '{data_str}'")
+
+                except socket.timeout:
+                    # Timeout jest OK
+                    continue
+                except ConnectionResetError:
+                    print("Połączenie resetowane przez ESP32")
+                    break
+                except Exception as e:
+                    print(f"Błąd podczas obsługi połączenia: {e}")
+                    break
 
         except Exception as e:
             print(f"Błąd obsługi klienta: {e}")
         finally:
             client_socket.close()
+            print("Połączenie z ESP32 zakończone")
+
     def _detect_reed_changes(self, previous_data, current_data):
         """Wykrywa zmiany w stanach przełączników Reed i obsługuje je."""
         changes = []

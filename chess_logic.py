@@ -22,9 +22,8 @@ def process_data(reed_data):
     """
     global pulse_state, last_pulse_change
 
-    # Aktualizacja stanu pulsacji co 0.5 sekundy
     current_time = time.time()
-    if current_time - last_pulse_change > 0.5:
+    if current_time - last_pulse_change > 0.2:
         pulse_state = not pulse_state
         last_pulse_change = current_time
 

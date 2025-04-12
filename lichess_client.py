@@ -70,7 +70,6 @@ class LichessClient:
                 print("Przyczyną może być tempo gry (tylko Classical i Correspondence są obsługiwane)")
                 print("lub inne ograniczenia (gra musi być publiczna, nie może być zakończona, itp.)")
 
-                # Użyj alternatywnego API do śledzenia partii
                 self._track_with_alternative_api()
             else:
                 print(f"Wystąpił błąd API: {e}")
